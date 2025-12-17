@@ -49,7 +49,7 @@ def treinar_modelo_leve(df_input):
 # Treina o modelo leve ao iniciar
 modelo_nn, dados_norm = treinar_modelo_leve(df)
 
-# 4. Função de Recomendação com "Artist Boost"
+# 4. Função de Recomendação Blindada (Garantia de Artista)
 def recomendar(termo, df, modelo, matriz_dados):
     termo = termo.lower().strip()
     songs_lower = df['Song'].str.lower()
@@ -58,48 +58,61 @@ def recomendar(termo, df, modelo, matriz_dados):
     idx_alvo = None
     msg = ""
     artista_alvo = ""
+    nome_musica_alvo = ""
 
-    # --- ETAPA 1: LOCALIZAR O ALVO ---
+    # --- ETAPA 1: LOCALIZAR O ALVO (Música ou Artista) ---
     matches_song = df[songs_lower.str.contains(termo, na=False)]
+    
     if not matches_song.empty:
+        # Prioriza match exato se houver, senão pega o primeiro parcial
+        match_exato = matches_song[songs_lower == termo]
+        if not match_exato.empty:
+            matches_song = match_exato
+            
         idx_alvo = matches_song.sort_values(by='Hot100_Score', ascending=False).index[0]
-        artista_alvo = df.loc[idx_alvo, 'Artist'] # Guardamos o nome do artista
-        msg = f"Baseado na música **{df.loc[idx_alvo, 'Song']}**:"
+        artista_alvo = df.loc[idx_alvo, 'Artist']
+        nome_musica_alvo = df.loc[idx_alvo, 'Song']
+        msg = f"Baseado na música **{nome_musica_alvo}**:"
     
     else:
         matches_artist = df[artists_lower.str.contains(termo, na=False)]
         if not matches_artist.empty:
+            # Pega o match exato de artista se possível
+            match_exato = matches_artist[artists_lower == termo]
+            if not match_exato.empty:
+                matches_artist = match_exato
+                
             top_track = matches_artist.sort_values(by=['Hot100_Score', 'Weeks in Charts'], ascending=[False, False]).iloc[0]
             idx_alvo = top_track.name
             artista_alvo = top_track['Artist']
-            msg = f"Artista encontrado! Usando o megahit **{top_track['Song']}** como referência:"
+            nome_musica_alvo = top_track['Song']
+            msg = f"Artista encontrado! Usando o megahit **{nome_musica_alvo}** como referência:"
         else:
             return None, "Não encontrado."
 
-    # --- ETAPA 2: BUSCAR VIZINHOS (MATH) ---
-    # Pedimos 50 vizinhos agora (para ter margem de escolha)
-    distances, indices = modelo.kneighbors([matriz_dados[df.index.get_loc(idx_alvo)]], n_neighbors=50)
+    # --- ETAPA 2: BALDE A - DO MESMO ARTISTA (Busca Direta) ---
+    # Aqui está a correção: buscamos no DF inteiro, não só nos vizinhos
+    # Filtramos pelo artista e removemos a música que usamos de âncora
+    df_artista = df[
+        (df['Artist'] == artista_alvo) & 
+        (df['Song'] != nome_musica_alvo)
+    ].sort_values(by='Hot100_Score', ascending=False)
     
-    # Indices dos vizinhos (ignorando o primeiro que é a própria âncora)
-    vizinhos_indices = indices[0][1:]
+    # Pegamos até 3 músicas dele
+    recomendacoes_artista = df_artista.head(3)
+
+    # --- ETAPA 3: BALDE B - DESCOBERTA (KNN) ---
+    # Buscamos vizinhos matemáticos
+    distances, indices = modelo.kneighbors([matriz_dados[df.index.get_loc(idx_alvo)]], n_neighbors=20)
+    vizinhos_indices = indices[0][1:] # Ignora a própria âncora
     
-    # --- ETAPA 3: FILTRAGEM INTELIGENTE (BUSINESS LOGIC) ---
-    # Pegamos as linhas do dataframe correspondentes
     vizinhos_df = df.iloc[vizinhos_indices].copy()
     
-    # Separamos em dois grupos
-    do_mesmo_artista = vizinhos_df[vizinhos_df['Artist'] == artista_alvo]
-    de_outros = vizinhos_df[vizinhos_df['Artist'] != artista_alvo]
+    # Removemos o próprio artista dessa lista para dar espaço aos outros
+    recomendacoes_outros = vizinhos_df[vizinhos_df['Artist'] != artista_alvo].head(7)
     
-    # Estratégia de Mix: Garantir até 3 do mesmo artista, completar com outros
-    recomendacoes_finais = pd.concat([
-        do_mesmo_artista.head(3),  # Pega até 3 do mesmo artista
-        de_outros.head(7)          # Completa com 7 de outros
-    ])
-    
-    # Se tiver menos de 10 no total, completa com o que tiver
-    if len(recomendacoes_finais) < 10:
-        recomendacoes_finais = vizinhos_df.head(10)
+    # --- ETAPA 4: MIX FINAL ---
+    recomendacoes_finais = pd.concat([recomendacoes_artista, recomendacoes_outros])
     
     return recomendacoes_finais, msg
 
