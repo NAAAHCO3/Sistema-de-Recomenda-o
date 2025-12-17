@@ -49,39 +49,59 @@ def treinar_modelo_leve(df_input):
 # Treina o modelo leve ao iniciar
 modelo_nn, dados_norm = treinar_modelo_leve(df)
 
-# 4. Função de Recomendação Otimizada
+# 4. Função de Recomendação com "Artist Boost"
 def recomendar(termo, df, modelo, matriz_dados):
-    termo = termo.lower()
+    termo = termo.lower().strip()
     songs_lower = df['Song'].str.lower()
     artists_lower = df['Artist'].str.lower()
     
     idx_alvo = None
     msg = ""
+    artista_alvo = ""
 
-    # Busca Música
-    matches_song = df[songs_lower == termo]
+    # --- ETAPA 1: LOCALIZAR O ALVO ---
+    matches_song = df[songs_lower.str.contains(termo, na=False)]
     if not matches_song.empty:
-        idx_alvo = matches_song.index[0]
+        idx_alvo = matches_song.sort_values(by='Hot100_Score', ascending=False).index[0]
+        artista_alvo = df.loc[idx_alvo, 'Artist'] # Guardamos o nome do artista
         msg = f"Baseado na música **{df.loc[idx_alvo, 'Song']}**:"
+    
     else:
-        # Busca Artista
-        matches_artist = df[artists_lower == termo]
+        matches_artist = df[artists_lower.str.contains(termo, na=False)]
         if not matches_artist.empty:
-            top_track = matches_artist.sort_values(by='Hot100_Score', ascending=False).iloc[0]
+            top_track = matches_artist.sort_values(by=['Hot100_Score', 'Weeks in Charts'], ascending=[False, False]).iloc[0]
             idx_alvo = top_track.name
-            msg = f"Artista encontrado! Usando o hit **{top_track['Song']}** como referência:"
+            artista_alvo = top_track['Artist']
+            msg = f"Artista encontrado! Usando o megahit **{top_track['Song']}** como referência:"
         else:
             return None, "Não encontrado."
 
-    # A MÁGICA: O modelo calcula os vizinhos SÓ AGORA, e só para esse item
-    # Retorna distâncias e índices
-    distances, indices = modelo.kneighbors([matriz_dados[idx_alvo]])
+    # --- ETAPA 2: BUSCAR VIZINHOS (MATH) ---
+    # Pedimos 50 vizinhos agora (para ter margem de escolha)
+    distances, indices = modelo.kneighbors([matriz_dados[df.index.get_loc(idx_alvo)]], n_neighbors=50)
     
-    # O indices[0] é uma lista com os 11 índices mais próximos
-    # indices[0][0] é a própria música, então pegamos do 1 ao 11
-    top_indices = indices[0][1:]
+    # Indices dos vizinhos (ignorando o primeiro que é a própria âncora)
+    vizinhos_indices = indices[0][1:]
     
-    return df.iloc[top_indices], msg
+    # --- ETAPA 3: FILTRAGEM INTELIGENTE (BUSINESS LOGIC) ---
+    # Pegamos as linhas do dataframe correspondentes
+    vizinhos_df = df.iloc[vizinhos_indices].copy()
+    
+    # Separamos em dois grupos
+    do_mesmo_artista = vizinhos_df[vizinhos_df['Artist'] == artista_alvo]
+    de_outros = vizinhos_df[vizinhos_df['Artist'] != artista_alvo]
+    
+    # Estratégia de Mix: Garantir até 3 do mesmo artista, completar com outros
+    recomendacoes_finais = pd.concat([
+        do_mesmo_artista.head(3),  # Pega até 3 do mesmo artista
+        de_outros.head(7)          # Completa com 7 de outros
+    ])
+    
+    # Se tiver menos de 10 no total, completa com o que tiver
+    if len(recomendacoes_finais) < 10:
+        recomendacoes_finais = vizinhos_df.head(10)
+    
+    return recomendacoes_finais, msg
 
 # 5. Interface
 input_usuario = st.text_input("Digite uma música ou artista:", placeholder="Ex: Adele, Queen, Toxic...")
